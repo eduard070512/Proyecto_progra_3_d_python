@@ -7,8 +7,11 @@ inmutables, funciones puras, evaluación perezosa y agregación basada en
 
 **Materia:** Programación Funcional, Ingeniería en Computación Inteligente,
 Universidad de Colima.
+
 **Profesor:** Sebastián González Zepeda.
-**Equipo:** _(nombres y matrículas)_
+
+**Equipo:** 
+Camila Gaitan Guzman 20221261
 
 ## Entregables
 
