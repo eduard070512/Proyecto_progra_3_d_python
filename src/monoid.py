@@ -24,7 +24,7 @@ from __future__ import annotations
 import operator
 from dataclasses import dataclass
 from functools import reduce
-from typing import Any, Callable, Generic, Iterable, Mapping, Tuple, TypeVar
+from typing import Any, Callable, Generic, Iterable, Mapping, Optional, Tuple, TypeVar
 
 A = TypeVar("A")
 B = TypeVar("B")
@@ -52,9 +52,16 @@ class Monoid(Semigroup[A]):
     """Semigroup con elemento neutro."""
 
     empty: Any = None
+    # Optimización opcional: reduce muchos valores de una vez. DEBE dar el
+    # mismo resultado que ``reduce(combine, values, empty)``. Puede usar
+    # mutación local internamente (no observable desde fuera => sigue siendo
+    # una función pura).
+    batch: Optional[Callable[[Iterable[A]], A]] = None
 
     def fold(self, values: Iterable[A]) -> A:
         """Reduce cualquier colección (vacía incluida) empezando en ``empty``."""
+        if self.batch is not None:
+            return self.batch(values)
         return reduce(self.combine, values, self.empty)
 
     def fold_map(self, fn: Callable[[B], A], values: Iterable[B]) -> A:

@@ -46,19 +46,25 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Optional,
     Sequence,
     Tuple,
+    TYPE_CHECKING,
     TypeVar,
 )
 
 from .monoid import Monoid, Semigroup
 from .partitioners import chunk, hash_partition
 
+if TYPE_CHECKING:
+    from .aggregators import Aggregator
+
 T = TypeVar("T")
 U = TypeVar("U")
 K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
 W = TypeVar("W")
+R = TypeVar("R")
 
 DEFAULT_PARALLEL_THRESHOLD = 5_000
 
@@ -97,7 +103,14 @@ def _apply_ops(ops: Tuple[Op, ...], items: Iterable[Any]) -> Iterator[Any]:
     return iter(stream)
 
 
-def _combine_pairs(combine: Callable[[V, V], V], pairs: Iterable[Tuple[K, V]]) -> Tuple[Tuple[K, V], ...]:
+def _combine_pairs(semigroup: Semigroup[V], pairs: Iterable[Tuple[K, V]]) -> Tuple[Tuple[K, V], ...]:
+    """Combiner: reduce los valores de cada clave con el semigroup."""
+    if isinstance(semigroup, Monoid) and semigroup.batch is not None:
+        groups: Dict[K, List[V]] = {}
+        for k, v in pairs:
+            groups.setdefault(k, []).append(v)
+        return tuple((k, semigroup.fold(vs)) for k, vs in groups.items())
+    combine = semigroup.combine
     acc: Dict[K, V] = {}
     for k, v in pairs:
         acc[k] = combine(acc[k], v) if k in acc else v
@@ -110,23 +123,54 @@ def _task_materialize(args: Tuple[Tuple[Op, ...], Tuple[Any, ...]]) -> Tuple[Any
 
 
 def _task_map_combine(
-    args: Tuple[Tuple[Tuple[Op, ...], Callable[[Any, Any], Any]], Tuple[Any, ...]]
+    args: Tuple[Tuple[Tuple[Op, ...], Semigroup[Any]], Tuple[Any, ...]]
 ) -> Tuple[Tuple[Any, Any], ...]:
     """Fase map + combiner local: ejecuta el plan y reduce por clave."""
-    (ops, combine), block = args
-    return _combine_pairs(combine, _apply_ops(ops, block))
+    (ops, semigroup), block = args
+    return _combine_pairs(semigroup, _apply_ops(ops, block))
 
 
-def _task_reduce(
-    args: Tuple[Callable[[Any, Any], Any], Tuple[Tuple[Any, Any], ...]]
-) -> Tuple[Tuple[Any, Any], ...]:
-    combine, block = args
-    return _combine_pairs(combine, block)
+def _task_reduce(args: Tuple[Semigroup[Any], Tuple[Tuple[Any, Any], ...]]) -> Tuple[Tuple[Any, Any], ...]:
+    semigroup, block = args
+    return _combine_pairs(semigroup, block)
 
 
 def _task_fold(args: Tuple[Tuple[Tuple[Op, ...], Monoid[Any]], Tuple[Any, ...]]) -> Any:
     (ops, monoid), block = args
     return monoid.fold(_apply_ops(ops, block))
+
+
+def _task_join(args: Tuple[str, Tuple[Tuple[Any, ...], Tuple[Any, ...]]]) -> Tuple[Any, ...]:
+    """Join de una partición: ambas partes contienen las mismas claves (hash)."""
+    how, (left, right) = args
+    index: Dict[Any, List[Any]] = {}
+    for k, w in right:
+        index.setdefault(k, []).append(w)
+    out: List[Any] = []
+    matched = set()
+    for k, v in left:
+        if k in index:
+            matched.add(k)
+            out.extend((k, (v, w)) for w in index[k])
+        elif how in ("left", "outer"):
+            out.append((k, (v, None)))
+    if how == "outer":
+        for k, ws in index.items():
+            if k not in matched:
+                out.extend((k, (None, w)) for w in ws)
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class _Window:
+    """Asigna cada registro al inicio de su ventana de tiempo (tumbling window)."""
+
+    time_fn: Callable[[Any], float]
+    size: float
+
+    def __call__(self, x: Any) -> float:
+        t = self.time_fn(x)
+        return t - (t % self.size)
 
 
 def _is_picklable(obj: Any) -> bool:
@@ -178,10 +222,17 @@ class MapReduce(Generic[T]):
 
     # ----- motor de ejecución ---------------------------------------------
 
-    def _run(self, task: Callable[[Tuple[Any, Any]], W], payload: Any, blocks: Sequence[Tuple[Any, ...]]) -> List[W]:
+    def _run(
+        self,
+        task: Callable[[Tuple[Any, Any]], W],
+        payload: Any,
+        blocks: Sequence[Any],
+        size: Optional[int] = None,
+    ) -> List[W]:
         """Ejecuta ``task`` sobre cada bloque, en paralelo si es posible."""
         jobs = [(payload, b) for b in blocks]
-        size = sum(len(b) for b in blocks)
+        if size is None:
+            size = sum(len(b) for b in blocks)
         if self.workers > 1 and size >= self.parallel_threshold and _is_picklable(payload):
             with ProcessPoolExecutor(max_workers=self.workers) as pool:
                 return list(pool.map(task, jobs))
@@ -235,14 +286,12 @@ class MapReduce(Generic[T]):
             )
         if not self.source:
             return self._with(())
-        combine = semigroup.combine
-
         # 1-2. split + plan pendiente + combiner local, en cada worker
-        partials = self._run(_task_map_combine, (self.ops, combine), self._blocks())
+        partials = self._run(_task_map_combine, (self.ops, semigroup), self._blocks())
         # 3. shuffle: misma clave -> misma partición
         shuffled = hash_partition(chain.from_iterable(partials), self.workers)
         # 4. reduce final por partición
-        reduced = self._run(_task_reduce, combine, shuffled)
+        reduced = self._run(_task_reduce, semigroup, shuffled)
         return self._with(_sorted_if_possible(chain.from_iterable(reduced)))
 
     def group_by_key(self: "MapReduce[Tuple[K, V]]") -> "MapReduce[Tuple[K, Tuple[V, ...]]]":
@@ -260,6 +309,55 @@ class MapReduce(Generic[T]):
 
     def take(self, n: int) -> "MapReduce[T]":
         return self._with(islice(self.data, n))
+
+    def union(self, other: "MapReduce[T]") -> "MapReduce[T]":
+        """Une dos colecciones (por ejemplo, datos de dos fuentes distintas)."""
+        return self._with(self.data + other.data)
+
+    def window(self, time_fn: Callable[[T], float], size: float) -> "MapReduce[Tuple[float, T]]":
+        """Ventanas de tiempo fijas: cada x se convierte en (inicio_ventana, x)."""
+        if size <= 0:
+            raise ValueError("size debe ser > 0")
+        return self.key_by(_Window(time_fn, size))
+
+    def join(
+        self: "MapReduce[Tuple[K, V]]",
+        other: "MapReduce[Tuple[K, W]]",
+        how: str = "inner",
+    ) -> "MapReduce[Tuple[K, Tuple[Optional[V], Optional[W]]]]":
+        """Join distribuido por clave (``inner``, ``left`` u ``outer``).
+
+        Ambos lados se reparten con el mismo hash, así cada clave queda en la
+        misma partición de los dos lados y cada worker hace un join local.
+        """
+        if how not in ("inner", "left", "outer"):
+            raise ValueError("how debe ser 'inner', 'left' u 'outer'")
+        left = hash_partition(self.data, self.workers)
+        right = hash_partition(other.data, self.workers)
+        pairs = list(zip(left, right))
+        size = sum(len(a) + len(b) for a, b in pairs)
+        parts = self._run(_task_join, how, pairs, size)
+        return self._with(_sorted_if_possible(chain.from_iterable(parts)))
+
+    # ----- agregadores composables (Semana 2) ------------------------------
+
+    def aggregate_with(self, agg: "Aggregator[T, Any, R]") -> "R":
+        """Aplica un ``Aggregator`` a toda la colección, en paralelo."""
+        return agg.present(self.map(agg.prepare).aggregate(agg.monoid))
+
+    def aggregate_by_key(self, key: Any, agg: "Aggregator[T, Any, R]") -> "MapReduce[Tuple[Any, R]]":
+        """Agrupa por ``key`` (campo o función) y aplica ``agg`` a cada grupo.
+
+        Equivale a ``GROUP BY key`` en SQL, pero distribuido.
+        """
+        from .aggregators import getter
+
+        return (
+            self.key_by(getter(key))
+            .map_values(agg.prepare)
+            .reduce_by_key(agg.monoid)
+            .map_values(agg.present)
+        )
 
     # ----- acciones (devuelven un valor) ------------------------------------
 

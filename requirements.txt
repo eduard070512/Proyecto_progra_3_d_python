@@ -1,1 +1,3 @@
 pytest>=7.0
+# Opcional: sólo para generar benchmarks/speedup.png
+matplotlib>=3.7

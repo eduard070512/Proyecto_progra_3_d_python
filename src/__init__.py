@@ -16,6 +16,21 @@ from .monoid import (
     product_monoid,
 )
 from .partitioners import chunk, hash_partition, range_partition
+from .aggregators import (
+    Aggregator,
+    combine,
+    count,
+    describe,
+    max_of,
+    mean_of,
+    min_of,
+    quantiles_of,
+    stddev_of,
+    sum_of,
+    top_k,
+    variance_of,
+)
+from .sources import Record, read_csv_sources
 
 __all__ = [
     "MapReduce",
@@ -35,4 +50,18 @@ __all__ = [
     "chunk",
     "hash_partition",
     "range_partition",
+    "Aggregator",
+    "combine",
+    "count",
+    "describe",
+    "max_of",
+    "mean_of",
+    "min_of",
+    "quantiles_of",
+    "stddev_of",
+    "sum_of",
+    "top_k",
+    "variance_of",
+    "Record",
+    "read_csv_sources",
 ]
