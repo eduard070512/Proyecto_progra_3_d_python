@@ -12,6 +12,7 @@ Universidad de Colima.
 
 **Equipo:** 
 Camila Gaitan Guzman 20221261
+Ailed Camila Gudiño 20224860
 
 
 ## Entregables
