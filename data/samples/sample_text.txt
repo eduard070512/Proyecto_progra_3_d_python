@@ -1,0 +1,7 @@
+La programación funcional trata a la computación como la evaluación de funciones matemáticas.
+MapReduce es un modelo de programación para procesar grandes volúmenes de datos en paralelo.
+En MapReduce la función map transforma cada registro y la función reduce agrega los resultados.
+Las funciones puras no tienen efectos laterales y por eso se pueden ejecutar en paralelo.
+Un monoid tiene una operación asociativa y un elemento neutro.
+La asociatividad permite reducir cada partición por separado y combinar los resultados.
+Los datos inmutables evitan condiciones de carrera entre procesos.
